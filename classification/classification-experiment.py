@@ -8,7 +8,7 @@ import nlp
 
 import optuna
 
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score, average_precision_score
 import numpy as np
 
 from tqdm import tqdm
@@ -20,6 +20,12 @@ class MultilabeledSequenceModel(nn.Module):
     def __init__(self,
                  pretrained_model_name,
                  label_nbr):
+        """
+        Just extends the AutoModelForSequenceClassification for N labels
+
+        pretrained_model_name string -> name of the pretrained model to be fetched from HuggingFace repo
+        label_nbr int -> number of labels of the dataset
+        """
         super().__init__()
         self.transformer = AutoModel.from_pretrained(pretrained_model_name)
         self.classifier = nn.Sequential(
@@ -48,6 +54,11 @@ def train_epoch(model,
                 dataset,
                 batch_size,
                 device):
+
+    # trains a model for an epoch, creating a dataloader from a huggingface/nlp dataset
+    # the parameters are auto-explanatory
+    # assumes model already on device
+
     dataloader_train = DataLoader(dataset['train'],
                                   shuffle=True,
                                   batch_size=batch_size)
@@ -64,6 +75,10 @@ def evaluate(model,
              dataset,
              batch_size,
              device):
+    # evaluates a model by getting the predictions, aside with labels, of a dataset
+    # creates the dataloader from a huggingface/nlp dataset
+    # assumes model already in device
+
     dataloader_test = DataLoader(dataset['test'],
                                  shuffle=True,
                                  batch_size=batch_size)
@@ -85,8 +100,15 @@ def calculate_metric(metric_name,
                      labels,
                      preds,
                      reference_class):
+    # using labels and predictions, score them for a metric
+    # metric name supports accuracy, f1_score, precision_score, recall_score and average_precision_score
+    # reference_class binarizes labels relative to that class
+
     if metric_name == "accuracy":
         return (labels == preds).mean()
+
+    if metric_name == "average_precision_score":
+        return average_precision_score(labels, preds)
 
     # binarize labels referent to class
     labels = (labels == reference_class).astype(np.float32)
@@ -95,6 +117,12 @@ def calculate_metric(metric_name,
     # get the metrics as boss
     if metric_name == "f1_score":
         return f1_score(labels, preds)
+
+    if metric_name == "precision_score":
+        return precision_score(labels, preds)
+
+    if metric_name == "recall_score":
+        return recall_score(labels, preds)
 
     # if metric is not put here, just return the accuracy for binarized labels
     return (labels == preds).mean()
@@ -107,10 +135,21 @@ def hp_search(trial: optuna.Trial,
               metric_name,
               reference_class,
               device):
+    """
+    objective function for optuna.study optimizes for epoch number, lr and batch_size
 
+    :param trial: optuna.Trial, trial of optuna, which will optimize for hyperparameters
+    :param model_name: name of the pretrained model
+    :param dataset: huggingface/nlp dataset object
+    :param label_nbr: number of label for the model to output
+    :param metric_name: name of the metric to maximize
+    :param reference_class: reference class to calculate metrics for
+    :param device: device where the training will occur, cuda recommended
+    :return: metric after training
+
+    """
     lr = trial.suggest_float("lr", 1e-7, 1e-4, log=True)
     batch_size = trial.suggest_categorical("batch_size", [2, 4, 6])
-    seed = trial.suggest_int("seed", 1, 40)
     epochs = trial.suggest_int("epochs", 1, 5)
 
     model = MultilabeledSequenceModel(pretrained_model_name=model_name,
