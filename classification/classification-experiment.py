@@ -113,31 +113,30 @@ def hp_search(trial: optuna.Trial,
     seed = trial.suggest_int("seed", 1, 40)
     epochs = trial.suggest_int("epochs", 1, 5)
 
-    with nlp.temp_seed(seed, set_pytorch=True):
-        model = MultilabeledSequenceModel(pretrained_model_name=model_name,
-                                          label_nbr=label_nbr)
-        optimizer = AdamW(params=model.parameters(), lr=lr)
-        for epoch in range(epochs):
-            train_epoch(model,
-                        optimizer,
-                        dataset,
-                        batch_size,
-                        device)
+    model = MultilabeledSequenceModel(pretrained_model_name=model_name,
+                                      label_nbr=label_nbr).to(device)
+    optimizer = AdamW(params=model.parameters(), lr=lr)
+    for epoch in range(epochs):
+        train_epoch(model,
+                    optimizer,
+                    dataset,
+                    batch_size,
+                    device)
 
-            labels, preds = evaluate(model,
-                                     dataset,
-                                     batch_size,
-                                     device)
+        labels, preds = evaluate(model,
+                                  dataset,
+                                  batch_size,
+                                  device)
 
-            metric = calculate_metric(metric_name,
-                                      labels,
-                                      preds,
-                                      reference_class)
+        metric = calculate_metric(metric_name,
+                                  labels,
+                                  preds,
+                                  reference_class)
 
-            trial.report(metric, epoch)
+        trial.report(metric, epoch)
 
-            if trial.should_prune():
-                raise optuna.TrialPruned()
+        if trial.should_prune():
+            raise optuna.TrialPruned()
 
     return metric
 
@@ -145,11 +144,11 @@ def hp_search(trial: optuna.Trial,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--model-name", default="bert-base-multilingual-cased", type=str, required=True,
+    parser.add_argument("--model-name", default="bert-base-multilingual-cased", type=str,
                         help="Pretrained model name to be fetched from HuggingFace repo")
-    parser.add_argument("--train-data-path", default="train.csv", type=str, required=True,
+    parser.add_argument("--train-data-path", default="train.csv", type=str,
                         help="Path of the train .csv file")
-    parser.add_argument("--test-data-path", default="test.csv", type=str, required=True,
+    parser.add_argument("--test-data-path", default="test.csv", type=str,
                         help="Path of the test .csv file")
     parser.add_argument("--max-sequence-length", type=int, default=25, help="Max length for the sequence to be padded "
                                                                             "with")
@@ -158,6 +157,7 @@ if __name__ == "__main__":
     parser.add_argument("--reference-class", type=int, default=1, help="reference class index for the metric, in case "
                                                                        "of binary-specific metrics to optimize the "
                                                                        "model for")
+    parser.add_argument("--label-nbr", type=int, default=2, help="Number of labels for the dataset")
 
     args = parser.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -168,14 +168,14 @@ if __name__ == "__main__":
         'test': f"{args.test_data_path}"
     })
 
-    dataset = dataset.map(encode_dataset)
+    dataset = dataset.map(lambda i: encode_dataset(tokenizer, i, args.max_sequence_length))
     dataset.set_format(type='torch', columns=['input_ids', 'label'])
 
     objective = lambda trial: hp_search(trial,
                                         model_name=args.model_name,
                                         dataset=dataset,
                                         label_nbr=args.label_nbr,
-                                        metric_name="accuracy",
+                                        metric_name=args.metric,
                                         reference_class=1,
                                         device=device)
     study = optuna.create_study(direction="maximize")
