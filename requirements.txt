@@ -1,0 +1,6 @@
+transformers
+nlp
+torch
+sklearn
+numpy
+tqdm
