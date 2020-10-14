@@ -6,7 +6,9 @@ import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer, AutoConfig, AdamW
 import nlp
 
-from sklearn.metrics import confusion_matrix
+import optuna
+
+from sklearn.metrics import f1_score
 import numpy as np
 
 from tqdm import tqdm
@@ -19,7 +21,7 @@ class MultilabeledSequenceModel(nn.Module):
                  pretrained_model_name,
                  label_nbr):
         super().__init__()
-        self.transformer = AutoModel.from_pretrained('bert-base-multilingual-cased')
+        self.transformer = AutoModel.from_pretrained(pretrained_model_name)
         self.classifier = nn.Sequential(
             nn.Dropout(0.1),
             nn.Linear(list(self.transformer.modules())[-2].out_features,
@@ -29,6 +31,16 @@ class MultilabeledSequenceModel(nn.Module):
     def forward(self, x):
         x = self.transformer(x)[1]
         return self.classifier(x)
+
+
+def encode_dataset(tokenizer,
+                   example,
+                   max_length
+                   ):
+    return tokenizer(example['sentence'],
+                     padding='max_length',
+                     truncation=True,
+                     max_length=max_length)
 
 
 def train_epoch(model,
@@ -69,14 +81,65 @@ def evaluate(model,
     return np.concatenate(eval_labels), np.concatenate(eval_preds)
 
 
-def encode_dataset(tokenizer,
-                   example,
-                   max_length
-                   ):
-    return tokenizer(example['sentence'],
-                     padding='max_length',
-                     truncation=True,
-                     max_length=max_length)
+def calculate_metric(metric_name,
+                     labels,
+                     preds,
+                     reference_class):
+    if metric_name == "accuracy":
+        return (labels == preds).mean()
+
+    # binarize labels referent to class
+    labels = (labels == reference_class).astype(np.float32)
+    preds = (preds == reference_class).astype(np.float32)
+
+    # get the metrics as boss
+    if metric_name == "f1_score":
+        return f1_score(labels, preds)
+
+    # if metric is not put here, just return the accuracy for binarized labels
+    return (labels == preds).mean()
+
+
+def hp_search(trial: optuna.Trial,
+              model_name: str,
+              dataset,
+              label_nbr,
+              metric_name,
+              reference_class,
+              device):
+
+    lr = trial.suggest_float("lr", 1e-7, 1e-4, log=True)
+    batch_size = trial.suggest_categorical("batch_size", [2, 4, 6])
+    seed = trial.suggest_int("seed", 1, 40)
+    epochs = trial.suggest_int("epochs", 1, 5)
+
+    with nlp.temp_seed(seed, set_pytorch=True):
+        model = MultilabeledSequenceModel(pretrained_model_name=model_name,
+                                          label_nbr=label_nbr)
+        optimizer = AdamW(params=model.parameters(), lr=lr)
+        for epoch in range(epochs):
+            train_epoch(model,
+                        optimizer,
+                        dataset,
+                        batch_size,
+                        device)
+
+            labels, preds = evaluate(model,
+                                     dataset,
+                                     batch_size,
+                                     device)
+
+            metric = calculate_metric(metric_name,
+                                      labels,
+                                      preds,
+                                      reference_class)
+
+            trial.report(metric, epoch)
+
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+    return metric
 
 
 if __name__ == "__main__":
@@ -97,6 +160,7 @@ if __name__ == "__main__":
                                                                        "model for")
 
     args = parser.parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
 
     dataset = nlp.load_dataset('csv', data_files={
@@ -107,3 +171,12 @@ if __name__ == "__main__":
     dataset = dataset.map(encode_dataset)
     dataset.set_format(type='torch', columns=['input_ids', 'label'])
 
+    objective = lambda trial: hp_search(trial,
+                                        model_name=args.model_name,
+                                        dataset=dataset,
+                                        label_nbr=args.label_nbr,
+                                        metric_name="accuracy",
+                                        reference_class=1,
+                                        device=device)
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, timeout=1800)
